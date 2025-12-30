@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# Model files (large)
+*.pt
+!ppe_yolo8n.pt
+!ppe_yolov8_best.pt
+
+# Training outputs
+ppe_training/
+runs/
+
+# Data
+s3_images/
+datasets/
+
+# Reports (generated)
+report_*/
+result_*/
+reports/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/

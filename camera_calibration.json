@@ -1,0 +1,66 @@
+{
+  "version": "1.0",
+  "description": "Camera calibration parameters for PPE detection fish-eye correction",
+  "settings": {
+    "enabled": true,
+    "balance": 0.0,
+    "notes": "balance: 0.0 = full crop (no black borders), 1.0 = full image with black borders"
+  },
+  "cameras": {
+    "left": {
+      "camera_matrix": [
+        [1920.0, 0.0, 1920.0],
+        [0.0, 1920.0, 960.0],
+        [0.0, 0.0, 1.0]
+      ],
+      "distortion_coeffs": [-0.35, 0.12, 0.0, 0.0],
+      "image_size": [3840, 1920],
+      "is_fisheye": true,
+      "model_type": "equirectangular",
+      "notes": "Left camera - 360 degree equirectangular projection (3840x1920)"
+    },
+    "right": {
+      "camera_matrix": [
+        [1920.0, 0.0, 1920.0],
+        [0.0, 1920.0, 960.0],
+        [0.0, 0.0, 1.0]
+      ],
+      "distortion_coeffs": [-0.35, 0.12, 0.0, 0.0],
+      "image_size": [3840, 1920],
+      "is_fisheye": true,
+      "model_type": "equirectangular",
+      "notes": "Right camera - 360 degree equirectangular projection (3840x1920)"
+    },
+    "down": {
+      "camera_matrix": [
+        [1170.0, 0.0, 1170.0],
+        [0.0, 1170.0, 1080.0],
+        [0.0, 0.0, 1.0]
+      ],
+      "distortion_coeffs": [-0.40, 0.15, 0.0, 0.0],
+      "image_size": [2340, 2160],
+      "is_fisheye": true,
+      "model_type": "circular_fisheye",
+      "notes": "Down camera - ceiling mounted circular fisheye (2340x2160)"
+    }
+  },
+  "tuning_guide": {
+    "distortion_coeffs": {
+      "k1": "First coefficient - negative for barrel distortion (fisheye), positive for pincushion",
+      "k2": "Second coefficient - fine-tunes the correction",
+      "p1": "Tangential distortion coefficient 1 (usually 0 for fisheye)",
+      "p2": "Tangential distortion coefficient 2 (usually 0 for fisheye)"
+    },
+    "camera_matrix": {
+      "fx": "Focal length X (typically width/2 for fisheye)",
+      "fy": "Focal length Y (typically height for 360, height/2 for circular)",
+      "cx": "Principal point X (typically width/2)",
+      "cy": "Principal point Y (typically height/2)"
+    },
+    "adjustment_tips": [
+      "Increase |k1| for more barrel distortion correction",
+      "Decrease |k1| if overcorrecting (pincushion effect appears)",
+      "Adjust balance in settings: 0=crop black borders, 1=keep full image"
+    ]
+  }
+}
