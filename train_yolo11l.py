@@ -27,7 +27,7 @@ CONFIG = {
     # Training parameters - OPTIMIZED FOR NVIDIA RTX 4060 (8GB VRAM)
     'epochs': 100,          # More epochs for better convergence
     'imgsz': 640,           # Image size
-    'batch': 16,            # Batch size optimized for 4060 8GB VRAM
+    'batch': 4,             # Reduced batch size for 8GB VRAM with Large model
     'patience': 15,         # Early stopping patience
     'workers': 8,           # Data loader workers
 

@@ -39,20 +39,26 @@ except ImportError:
 # ============================================================
 CONFIG = {
     'time_filter_enabled': True,
-    'start_hour_utc': 5,      # 12AM EST
-    'end_hour_utc': 21,       # 4PM EST
+    'start_hour_utc': 5,      # 12AM EST (fallback)
+    'end_hour_utc': 21,       # 4PM EST (fallback)
     'base_confidence': 0.15,  # Base confidence (class-specific thresholds applied after)
     'model_path': 'ppe_yolo11l_best.pt',  # YOLOv11 large model (fallback to yolo8n if not found)
-    'min_persons': 3,         # Minimum persons to include in report samples (more than 2)
-    'max_samples_per_camera': 10,  # Max sample images per camera
+    'min_persons': 1,         # Minimum persons to include in report samples
+    'max_samples_per_camera': 50,  # Max sample images per camera per date
 
     # Lens correction
-    'lens_correction_enabled': True,
+    'lens_correction_enabled': False,  # Disabled - was distorting images
     'lens_correction_config': 'camera_calibration.json',
 
     # Image preprocessing
-    'apply_clahe': True,           # Contrast enhancement
-    'normalize_brightness': True,  # Brightness normalization
+    'apply_clahe': False,           # Disabled - use original image quality
+    'normalize_brightness': False,  # Disabled - use original image quality
+
+    # Date-specific time windows (EST converted to UTC by adding 5 hours)
+    'date_time_windows': {
+        '10-31': {'start': '17:10:00', 'end': '18:10:50'},  # 12:10 PM - 1:10:50 PM EST
+        '11-7': {'start': '18:07:55', 'end': '18:35:42'},   # 1:07:55 PM - 1:35:42 PM EST
+    },
 }
 
 # Class-specific confidence thresholds (applied after detection)
@@ -149,6 +155,31 @@ def filter_by_time(paths, start=5, end=21):
     for p in paths:
         ts = parse_timestamp(Path(p).name)
         if ts is None or is_in_time_range(ts, start, end):
+            filtered.append(p)
+    return filtered
+
+def filter_by_date_time_window(paths, date_key, time_windows):
+    """Filter images by date-specific time windows"""
+    if date_key not in time_windows:
+        return paths  # No filter for this date
+
+    window = time_windows[date_key]
+    start_time = window['start']  # Format: "HH:MM:SS"
+    end_time = window['end']
+
+    filtered = []
+    for p in paths:
+        ts = parse_timestamp(Path(p).name)
+        if ts is None:
+            filtered.append(p)
+            continue
+        try:
+            fmt = "%Y-%m-%dT%H:%M:%S.%fZ" if '.' in ts else "%Y-%m-%dT%H:%M:%SZ"
+            dt = datetime.strptime(ts, fmt)
+            img_time = dt.strftime("%H:%M:%S")
+            if start_time <= img_time <= end_time:
+                filtered.append(p)
+        except:
             filtered.append(p)
     return filtered
 
@@ -407,7 +438,8 @@ def annotate_image(img_path, result, output_path, image_for_annotation=None):
         cv2.rectangle(img, (x1, ty2 - th2 - 2), (x1 + tw2 + 4, ty2 + 2), BLACK, -1)
         cv2.putText(img, label2, (x1 + 2, ty2), font, scale, color2, thick)
 
-    cv2.imwrite(str(output_path), img)
+    # Save with high JPEG quality (95%)
+    cv2.imwrite(str(output_path), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
     return len(persons)
 
 def process_camera(model, images, camera_name, report_folder, min_persons=2, max_samples=10,
@@ -463,12 +495,16 @@ def process_camera(model, images, camera_name, report_folder, min_persons=2, max
             normalize_brightness=CONFIG.get('normalize_brightness', False)
         )
 
-        # Run detection on preprocessed image
+        # Run detection on preprocessed image (half=True for 2x speed on GPU)
+        # Only detect: Person (6), helmet (0), vest (2)
         result = model.predict(
             source=img_for_detection,
             save=False,
             conf=CONFIG.get('base_confidence', 0.15),
-            verbose=False
+            verbose=False,
+            half=True,
+            device=0,
+            classes=[0, 2, 6]
         )[0]
 
         # Count persons using class-specific thresholds
@@ -511,8 +547,25 @@ def process_camera(model, images, camera_name, report_folder, min_persons=2, max
 
     return pd.DataFrame(detections), multi_person_samples
 
-def generate_html_report(report_folder, samples_by_camera, stats, class_counts):
-    """Generate HTML report with sample images"""
+def generate_html_report(report_folder, samples_by_camera, stats, class_counts, all_df=None):
+    """Generate HTML report with sample images and detailed analysis"""
+
+    # Calculate additional stats from dataframe
+    date_stats = {}
+    compliance_stats = {'with_helmet': 0, 'without_helmet': 0, 'with_vest': 0, 'without_vest': 0}
+
+    if all_df is not None and len(all_df) > 0:
+        # Per-date breakdown
+        for date_folder in all_df['date_folder'].unique():
+            date_data = all_df[all_df['date_folder'] == date_folder]
+            date_detections = date_data[date_data['class'] != 'NO_DETECTION']
+            date_stats[date_folder] = {
+                'images': len(date_data['image'].unique()),
+                'detections': len(date_detections),
+                'persons': len(date_data[date_data['class'] == 'Person']),
+                'helmets': len(date_data[date_data['class'] == 'helmet']),
+                'vests': len(date_data[date_data['class'] == 'vest']),
+            }
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -522,32 +575,46 @@ def generate_html_report(report_folder, samples_by_camera, stats, class_counts):
         body {{ font-family: Arial, sans-serif; margin: 20px; background: #1a1a1a; color: #fff; }}
         h1 {{ color: #4CAF50; }}
         h2 {{ color: #2196F3; border-bottom: 1px solid #333; padding-bottom: 10px; }}
+        h3 {{ color: #FF9800; }}
         .stats {{ background: #2a2a2a; padding: 20px; border-radius: 8px; margin: 20px 0; }}
         .stats-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }}
+        .stats-grid-4 {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }}
         .stat-box {{ background: #333; padding: 15px; border-radius: 5px; text-align: center; }}
         .stat-value {{ font-size: 24px; font-weight: bold; color: #4CAF50; }}
-        .stat-label {{ color: #888; }}
+        .stat-value.warning {{ color: #FF9800; }}
+        .stat-value.danger {{ color: #f44336; }}
+        .stat-label {{ color: #888; font-size: 12px; }}
         .camera-section {{ margin: 30px 0; }}
-        .samples {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }}
+        .samples {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }}
         .sample {{ background: #2a2a2a; padding: 10px; border-radius: 8px; }}
-        .sample img {{ width: 100%; border-radius: 5px; }}
-        .sample-info {{ padding: 10px 0; font-size: 12px; color: #888; }}
+        .sample img {{ width: 100%; border-radius: 5px; cursor: pointer; transition: transform 0.2s; }}
+        .sample img:hover {{ transform: scale(1.02); }}
+        .sample-info {{ padding: 10px 0; font-size: 11px; color: #888; }}
+        .sample-info strong {{ color: #fff; }}
         table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-        th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #333; }}
-        th {{ background: #333; }}
+        th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #333; }}
+        th {{ background: #333; color: #4CAF50; }}
+        tr:hover {{ background: #2a2a2a; }}
+        .class-table {{ max-width: 500px; }}
+        .date-section {{ background: #252525; padding: 15px; border-radius: 8px; margin: 15px 0; }}
+        .badge {{ display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 11px; margin: 2px; }}
+        .badge-person {{ background: #2196F3; }}
+        .badge-helmet {{ background: #4CAF50; }}
+        .badge-vest {{ background: #FF9800; }}
     </style>
 </head>
 <body>
-    <h1>PPE Detection Report</h1>
+    <h1>PPE Detection Analysis Report</h1>
     <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
     <p>Report: {report_folder.name}</p>
+    <p>Camera: <strong>DOWN</strong> | Classes: <strong>Person, Helmet, Vest</strong></p>
 
     <div class="stats">
-        <h2>Summary Statistics</h2>
+        <h2>Overall Summary</h2>
         <div class="stats-grid">
             <div class="stat-box">
                 <div class="stat-value">{stats['total_images']:,}</div>
-                <div class="stat-label">Total Images</div>
+                <div class="stat-label">Total Images Analyzed</div>
             </div>
             <div class="stat-box">
                 <div class="stat-value">{stats['total_detections']:,}</div>
@@ -557,41 +624,89 @@ def generate_html_report(report_folder, samples_by_camera, stats, class_counts):
                 <div class="stat-value">{stats['images_with_persons']:,}</div>
                 <div class="stat-label">Images with Persons</div>
             </div>
+        </div>
+
+        <h3>Detection Breakdown by Class</h3>
+        <div class="stats-grid-4">
             <div class="stat-box">
-                <div class="stat-value">{stats['left_images']:,}</div>
-                <div class="stat-label">Left Camera</div>
+                <div class="stat-value">{class_counts.get('Person', 0):,}</div>
+                <div class="stat-label"><span class="badge badge-person">Person</span></div>
             </div>
             <div class="stat-box">
-                <div class="stat-value">{stats['right_images']:,}</div>
-                <div class="stat-label">Right Camera</div>
+                <div class="stat-value">{class_counts.get('helmet', 0):,}</div>
+                <div class="stat-label"><span class="badge badge-helmet">Helmet</span></div>
             </div>
             <div class="stat-box">
-                <div class="stat-value">{stats['down_images']:,}</div>
-                <div class="stat-label">Down Camera</div>
+                <div class="stat-value">{class_counts.get('vest', 0):,}</div>
+                <div class="stat-label"><span class="badge badge-vest">Vest</span></div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value {'warning' if class_counts.get('Person', 0) > 0 and class_counts.get('helmet', 0) < class_counts.get('Person', 0) else ''}">{class_counts.get('Person', 0) - class_counts.get('helmet', 0) if class_counts.get('Person', 0) > class_counts.get('helmet', 0) else 0}</div>
+                <div class="stat-label">Persons Without Helmet</div>
             </div>
         </div>
     </div>
+"""
 
-    # Add camera samples
+    # Add per-date breakdown
+    if date_stats:
+        html += """
+    <div class="stats">
+        <h2>Per-Date Analysis</h2>
+"""
+        for date_folder, ds in date_stats.items():
+            helmet_ratio = (ds['helmets'] / ds['persons'] * 100) if ds['persons'] > 0 else 0
+            vest_ratio = (ds['vests'] / ds['persons'] * 100) if ds['persons'] > 0 else 0
+            html += f"""
+        <div class="date-section">
+            <h3>{date_folder}</h3>
+            <div class="stats-grid-4">
+                <div class="stat-box">
+                    <div class="stat-value">{ds['images']:,}</div>
+                    <div class="stat-label">Images</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">{ds['persons']:,}</div>
+                    <div class="stat-label">Persons Detected</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">{ds['helmets']:,}</div>
+                    <div class="stat-label">Helmets ({helmet_ratio:.0f}%)</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">{ds['vests']:,}</div>
+                    <div class="stat-label">Vests ({vest_ratio:.0f}%)</div>
+                </div>
+            </div>
+        </div>
+"""
+        html += """
+    </div>
+"""
+
+    # Add camera samples (grouped by date folder)
     for camera, samples in samples_by_camera.items():
+        if not samples:
+            continue  # Skip empty camera sections
+
         html += f"""
     <div class="camera-section">
         <h2>{camera.upper()} Camera - Images with {CONFIG['min_persons']}+ Persons</h2>
         <div class="samples">
 """
         for sample in samples:
-            rel_path = f"{camera}/{sample['name']}"
+            # Path includes date_folder: {date_folder}/{camera}/{name}
+            date_folder = sample.get('date_folder', '')
+            rel_path = f"{date_folder}/{camera}/{sample['name']}"
             html += f"""
             <div class="sample">
                 <img src="{rel_path}" alt="{sample['name']}">
                 <div class="sample-info">
                     <strong>{sample['name']}</strong><br>
-                    Persons: {sample['persons']} | Time: {sample['timestamp'] or 'N/A'}
+                    Date: {date_folder} | Persons: {sample['persons']} | Time: {sample['timestamp'] or 'N/A'}
                 </div>
             </div>
 """
-        if not samples:
-            html += "<p>No images with 3+ persons found</p>"
 
         html += """
         </div>
@@ -651,53 +766,85 @@ def main():
     print(f"  Model loaded: {model_path}")
     print(f"  Classes: {list(model.names.values())}")
 
-    # Get images
+    # Get images from ALL date folders
     print("\n  Scanning images...")
-    left_all = get_images('s3_images/left')
-    right_all = get_images('s3_images/right')
-    down_all = get_images('s3_images/down')
+    date_folders = ['10-31', '11-7']
 
-    print(f"  Found: Left={len(left_all):,} Right={len(right_all):,} Down={len(down_all):,}")
+    all_dfs = []
+    all_left_samples = []
+    all_right_samples = []
+    all_down_samples = []
+    total_stats = {'left': 0, 'right': 0, 'down': 0}
 
-    # Filter by time
-    if CONFIG['time_filter_enabled']:
-        left = filter_by_time(left_all, CONFIG['start_hour_utc'], CONFIG['end_hour_utc'])
-        right = filter_by_time(right_all, CONFIG['start_hour_utc'], CONFIG['end_hour_utc'])
-        down = filter_by_time(down_all, CONFIG['start_hour_utc'], CONFIG['end_hour_utc'])
-        print(f"  After time filter (12AM-4PM EST): Left={len(left):,} Right={len(right):,} Down={len(down):,}")
-    else:
-        left, right, down = left_all, right_all, down_all
+    for date_folder in date_folders:
+        base_path = f's3_images/{date_folder}'
+        if not Path(base_path).exists():
+            print(f"  Skipping {date_folder} (folder not found)")
+            continue
 
-    # Process each camera
-    print("\n" + "=" * 70)
-    print("  PROCESSING CAMERAS")
-    print("=" * 70)
+        # Only process DOWN camera
+        down_all = get_images(f'{base_path}/down')
 
-    left_df, left_samples = process_camera(model, left, 'left', report_folder,
-                                           CONFIG['min_persons'], CONFIG['max_samples_per_camera'],
-                                           lens_corrector=lens_corrector)
-    right_df, right_samples = process_camera(model, right, 'right', report_folder,
-                                             CONFIG['min_persons'], CONFIG['max_samples_per_camera'],
-                                             lens_corrector=lens_corrector)
-    down_df, down_samples = process_camera(model, down, 'down', report_folder,
-                                           CONFIG['min_persons'], CONFIG['max_samples_per_camera'],
-                                           lens_corrector=lens_corrector)
+        print(f"\n  {date_folder}: Down={len(down_all):,} images")
 
-    # Combine results
-    all_df = pd.concat([left_df, right_df, down_df], ignore_index=True)
+        # Filter by date-specific time windows
+        if CONFIG['time_filter_enabled'] and 'date_time_windows' in CONFIG:
+            date_key = date_folder
+            down = filter_by_date_time_window(down_all, date_key, CONFIG['date_time_windows'])
+            window = CONFIG['date_time_windows'].get(date_key, {})
+            print(f"    After time filter ({window.get('start', 'N/A')} - {window.get('end', 'N/A')} UTC): Down={len(down):,}")
+        else:
+            down = down_all
+
+        if len(down) == 0:
+            print(f"    No images in time window, skipping...")
+            continue
+
+        total_stats['down'] += len(down)
+
+        # Process down camera for this date
+        print(f"\n  Processing {date_folder} (down camera only)...")
+
+        # Create date-specific subfolders
+        date_report_folder = report_folder / date_folder
+        date_report_folder.mkdir(exist_ok=True)
+
+        down_df, down_samples = process_camera(model, down, 'down', date_report_folder,
+                                               CONFIG['min_persons'], CONFIG['max_samples_per_camera'],
+                                               lens_corrector=lens_corrector)
+
+        # Add date column to track which folder images came from
+        down_df['date_folder'] = date_folder
+
+        # Update sample paths to include date folder
+        for s in down_samples:
+            s['date_folder'] = date_folder
+
+        all_dfs.append(down_df)
+        all_down_samples.extend(down_samples)
+
+    # Combine results from all dates
+    all_df = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
+    left_samples = []  # Not processing left/right
+    right_samples = []
+    down_samples = all_down_samples
     all_df.to_csv(report_folder / 'all_detections.csv', index=False)
 
     # Calculate stats
-    actual_detections = all_df[all_df['class'] != 'NO_DETECTION']
-    class_counts = actual_detections['class'].value_counts().to_dict()
+    if len(all_df) > 0:
+        actual_detections = all_df[all_df['class'] != 'NO_DETECTION']
+        class_counts = actual_detections['class'].value_counts().to_dict()
+    else:
+        actual_detections = pd.DataFrame()
+        class_counts = {}
 
     stats = {
-        'total_images': len(left) + len(right) + len(down),
+        'total_images': total_stats['down'],  # Only down camera
         'total_detections': len(actual_detections),
-        'images_with_persons': len(all_df[all_df['persons_in_image'] > 0]['image'].unique()),
-        'left_images': len(left),
-        'right_images': len(right),
-        'down_images': len(down),
+        'images_with_persons': len(all_df[all_df['persons_in_image'] > 0]['image'].unique()) if len(all_df) > 0 else 0,
+        'left_images': 0,
+        'right_images': 0,
+        'down_images': total_stats['down'],
     }
 
     # Generate HTML report
@@ -707,7 +854,7 @@ def main():
         'down': down_samples
     }
 
-    html_path = generate_html_report(report_folder, samples_by_camera, stats, class_counts)
+    html_path = generate_html_report(report_folder, samples_by_camera, stats, class_counts, all_df)
 
     # Save JSON summary
     summary = {
